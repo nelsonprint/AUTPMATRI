@@ -1,0 +1,272 @@
+// ==========================================
+// AUTOMATRI V2.6 — Direcional (ADX + DiPDiM) c/ Fusão Azul→Verde
+// ==========================================
+// Estratégia: Rompimento após Pullback + Stop por ATR
+// Mega Indicador embutido e suavizado com leitura real de direção (Di+/Di−)
+// ==========================================
+//
+// 🟢 Regime 4 = V1 (Forte Tendência)
+// 🔵 Regime 3 = V2 (Tendência Moderada)
+// 🟡/🔴 Regime 2/1 = Não opera
+//
+// ==========================================
+
+// ================== INPUTS ==================
+Input
+    TamanhoBrickPts(20);
+    AlvoBricks(6);
+    OffsetBricks(1);
+    DelayExecucao(0.000);
+    MostrarPainel(true);
+    MostrarRotuloRegime(true);
+    ContaPadrao("PRACTICE");
+
+// ================= VARIÁVEIS ================
+Var
+    // ---- Mega Indicador ----
+    ATR, ATRmin, ATRmax, ATRpct : Float;
+    ADXval, EMAcurta, EMAlonga, DifEMA : Float;
+    Score, Direcionalidade, InclinacaoEMA : Float;
+    SeqAlta, SeqBaixa : Integer;
+    DiPlus, DiMinus, TendenciaDirecional : Float;
+    Nivel, CorNivel, PainelCor : Integer;
+    RegimeNivel : Integer;
+    RegimeTexto : String;
+
+    // ---- Parâmetros Automáticos ----
+    ATRPeriodo, TipoATR : Integer;
+    DesvioATR : Float;
+    CooldownBarras, BarrasPullback, ConfirmacaoIntrabar, ExigirToqueATR : Integer;
+    InclinaA, InclinaD : Float;
+    ContinuacaoAtiva, LookbackContinuacao, LateralPeriodo : Integer;
+    LateralMinPts, LateralMaxPts : Float;
+    ReentradaAtiva, MicroPBMaxBarras, CooldownExtraReentrada : Integer;
+    PodeOperar : Boolean;
+
+    // ---- Setup Operacional ----
+    StopATRa, StopATRv1, StopATRv2, ValorATR, AlvoPts, OffsetPts : Float;
+    ValorATRv1, ValorATRv2 : Float;
+    PBokC, PBokV, TriggerC, TriggerV : Boolean;
+    SinalC, SinalV : Boolean;
+    TendenciaAlta, TendenciaBaixa : Boolean;
+    ExecutouNoCandle : Boolean;
+    CooldownAtual, CooldownReent, BarraDaUltimaExecucao : Integer;
+
+// ================= FUNÇÕES AUXILIARES =================
+Function ContarSequenciaAlta(Periodo : Integer) : Integer;
+Var i, cont : Integer; Continua : Boolean;
+Begin
+    cont := 0; Continua := True;
+    For i := 0 To Periodo - 1 Do
+    Begin
+        If Continua And (Close[i] > Close[i+1]) Then cont := cont + 1
+        Else Continua := False;
+    End;
+    ContarSequenciaAlta := cont;
+End;
+
+Function ContarSequenciaBaixa(Periodo : Integer) : Integer;
+Var i, cont : Integer; Continua : Boolean;
+Begin
+    cont := 0; Continua := True;
+    For i := 0 To Periodo - 1 Do
+    Begin
+        If Continua And (Close[i] < Close[i+1]) Then cont := cont + 1
+        Else Continua := False;
+    End;
+    ContarSequenciaBaixa := cont;
+End;
+
+// ================== INÍCIO ==================
+Begin
+    // ==========================================
+    // BLOCO 1 — MEGA INDICADOR DE REGIME (suavizado)
+    // ==========================================
+
+    ATR := AvgTrueRange(14, 2);
+    ATRmin := Lowest(ATR, 200);
+    ATRmax := Highest(ATR, 200);
+    Se (ATRmax > ATRmin) Entao
+        ATRpct := 100 * (ATR - ATRmin) / (ATRmax - ATRmin)
+    Senao
+        ATRpct := 0;
+
+    ADXval := ADX(14, 14);
+    EMAcurta := MediaExp(Fechamento, 9);
+    EMAlonga := MediaExp(Fechamento, 21);
+    DifEMA   := 100 * Abs(EMAcurta - EMAlonga) / EMAlonga;
+    InclinacaoEMA := (EMAcurta - EMAcurta[14]) / EMAlonga * 100;
+
+    SeqAlta  := ContarSequenciaAlta(8);
+    SeqBaixa := ContarSequenciaBaixa(8);
+    Direcionalidade := 0;
+    Se (SeqAlta >= 4) ou (SeqBaixa >= 4) Entao Direcionalidade := Direcionalidade + 2;
+    Se Abs(InclinacaoEMA) > 0.08 Entao Direcionalidade := Direcionalidade + 2;
+     
+    // ---------- Direção via ADX (Di+ / Di−) ----------
+    TendenciaAlta  := (EMAcurta > EMAlonga) e (TendenciaDirecional > 0);
+    TendenciaBaixa := (EMAcurta < EMAlonga) e (TendenciaDirecional < 0); 
+
+    DiPlus  := DiPDiM(14);
+    DiMinus := DiPDiM(14);
+
+    If (DiPlus + DiMinus) > 0 Then
+        TendenciaDirecional := ((DiPlus - DiMinus) / (DiPlus + DiMinus)) * ADXval
+    Else
+        TendenciaDirecional := 0;
+
+    Direcionalidade := Direcionalidade + (TendenciaDirecional / 10);
+
+    // --- Score suavizado ---
+    Score := 0;
+    Se ATRpct < 10 Entao Score := Score - 1;
+    Se ADXval < 10 Entao Score := Score - 1;
+    Se (ATRpct >= 10) e (ATRpct <= 70) Entao Score := Score + 1;
+    Se (ADXval >= 10) Entao Score := Score + 1;
+    Se (DifEMA > 0.04) Entao Score := Score + 1;
+    Score := Score + Direcionalidade;
+
+    // --- Classificação ---
+    Se Score <= 0 Entao
+    Inicio
+        Nivel := 1; CorNivel := clRed;  RegimeTexto := "Regime: RUIM";
+    Fim
+    Senao Se Score = 1 Entao
+    Inicio
+        Nivel := 2; CorNivel := clYellow; RegimeTexto := "Regime: TRANSIÇÃO";
+    Fim
+    Senao Se Score <= 3 Entao
+    Inicio
+        Nivel := 3; CorNivel := clBlue;  RegimeTexto := "Regime: TENDÊNCIA MODERADA";
+    Fim
+    Senao
+    Inicio
+        Nivel := 4; CorNivel := clLime;  RegimeTexto := "Regime: FORTE TENDÊNCIA";
+    Fim;
+
+    // --- Fusão Azul→Verde em pernas fortes ---
+    Se (Nivel = 3) e (Abs(TendenciaDirecional) > 2.5) e (Abs(InclinacaoEMA) > 0.08) Entao
+    Inicio
+        Nivel := 4; CorNivel := clLime; RegimeTexto := "Regime: FORTE TENDÊNCIA";
+    Fim;
+
+    RegimeNivel := Nivel;
+
+    // --- Visual ---
+    PaintBar(CorNivel);
+    Plot(Nivel);
+    SetPlotColor(1, CorNivel);
+    Se MostrarPainel Entao
+    Inicio
+        PainelCor := CorNivel;
+        Plot2(Nivel);
+        SetPlotColor(2, PainelCor);
+        SetPlotWidth(2, 4);
+    Fim;
+    Se MostrarRotuloRegime Entao
+    Inicio
+        Se LastBarOnChart() Entao
+            PlotText(RegimeTexto, CorNivel, 2, 10, Close);
+    Fim;
+
+    // ==========================================
+    // BLOCO 2 — PARÂMETROS AUTOMÁTICOS (V1/V2)
+    // ==========================================
+    Se RegimeNivel = 4 Entao
+    Inicio
+        // V1 — Forte Tendência
+        ATRPeriodo := 20;  TipoATR := 0;  DesvioATR := 100.0;
+        BarrasPullback := 2;  CooldownBarras := 15;
+        InclinaA := -12.0;  InclinaD := 12.0;
+        LateralPeriodo := 150;  LateralMinPts := 300;  LateralMaxPts := 400;
+        ContinuacaoAtiva := 0;  ReentradaAtiva := 0;
+        ConfirmacaoIntrabar := 0;  ExigirToqueATR := 1;
+        MicroPBMaxBarras := 1;  CooldownExtraReentrada := 0;
+        PodeOperar := True;
+    Fim
+    Senao Se RegimeNivel = 3 Entao
+    Inicio
+        // V2 — Tendência Moderada
+        ATRPeriodo := 14;  TipoATR := 0;  DesvioATR := 1.5;
+        BarrasPullback := 2;  CooldownBarras := 6;
+        InclinaA := -4;  InclinaD := 4;
+        LateralPeriodo := 15;  LateralMinPts := 80;  LateralMaxPts := 250;
+        ContinuacaoAtiva := 1;  ReentradaAtiva := 1;
+        ConfirmacaoIntrabar := 0;  ExigirToqueATR := 0;
+        MicroPBMaxBarras := 2;  CooldownExtraReentrada := 2;
+        PodeOperar := True;
+    Fim
+    Senao
+        PodeOperar := False;
+
+    // ==========================================
+    // BLOCO 3 — ESTRATÉGIA OPERACIONAL
+    // ==========================================
+    AlvoPts   := AlvoBricks   * TamanhoBrickPts;
+    OffsetPts := OffsetBricks * TamanhoBrickPts;
+
+    StopATRv1 := StopAtr(1.0, 1, 1);
+    StopATRv2 := StopAtr(2.0, 2, 2);
+    Se RegimeNivel = 4 Entao StopATRa := StopATRv1
+    Senao Se RegimeNivel = 3 Entao StopATRa := StopATRv2
+    Senao StopATRa := Close;
+
+    ValorATRv1 := AvgTrueRange(1, 2);
+    ValorATRv2 := AvgTrueRange(2, 2);
+    Se RegimeNivel = 4 Entao ValorATR := ValorATRv1
+    Senao Se RegimeNivel = 3 Entao ValorATR := ValorATRv2
+    Senao ValorATR := 0;
+
+    Se PodeOperar = False Entao
+    Inicio
+        Se LastBarOnChart() Entao PlotText("⚠ MERCADO INOPERÁVEL", clYellow, 2, 10, Close);
+    Fim
+    Senao
+    Inicio
+        TendenciaAlta  := (StopATRa <= Low);
+        TendenciaBaixa := (StopATRa >= High);
+
+       // ---------- Pullback ----------
+PBokC := (Close[1] < Open[1]);
+PBokV := (Close[1] > Open[1]); 
+
+     // ---------- Triggers ----------
+TriggerC := (Fechamento > High[1]) e (Fechamento > EMAcurta);
+TriggerV := (Fechamento < Low[1])  e (Fechamento < EMAcurta);
+ 
+
+     // ---------- Sinais (aceita pequenas inclinações a favor) ----------
+SinalC := TendenciaAlta  e (PBokC e TriggerC) e (InclinacaoEMA > -0.02);
+SinalV := TendenciaBaixa e (PBokV e TriggerV) e (InclinacaoEMA <  0.02); 
+        Se SinalC entao PlotText("▲", clGreen, 2, 9, Low  - 0.5 * TamanhoBrickPts);
+        Se SinalV entao PlotText("▼", clRed,   1, 9, High + 0.5 * TamanhoBrickPts);
+
+        Se HasPosition = False Entao
+        Inicio
+            Se SinalC Entao
+            Inicio
+                BuyAtMarket;
+                ExecutouNoCandle := True;
+                BarraDaUltimaExecucao := BarCount();
+            Fim;
+            Se SinalV Entao
+            Inicio
+                SellShortAtMarket;
+                ExecutouNoCandle := True;
+                BarraDaUltimaExecucao := BarCount();
+            Fim;
+        Fim;
+
+        Se IsBought Entao
+        Inicio
+            SellToCoverLimit(BuyPrice + AlvoPts);
+            SellToCoverStop(StopATRa, StopATRa - OffsetPts);
+        Fim;
+
+        Se IsSold Entao
+        Inicio
+            BuyToCoverLimit(SellPrice - AlvoPts);
+            BuyToCoverStop(StopATRa, StopATRa + OffsetPts);
+        Fim;
+    Fim;
+End;
