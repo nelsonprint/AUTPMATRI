@@ -1,0 +1,263 @@
+// ==========================================
+// GERANTSL_RompimentoDinamico v3.2 SafeMode++ (Candle Edition)
+// Estratégia de rompimento com SR congelado
+// - Anti-lateralidade dinâmica (ATR %)
+// - Gatilho único (1 entrada por rompimento)
+// - Stop inicial fixo + Stop dinâmico por retração (80/80) + proteção (50)
+// - Não reentra na mesma barra após stop dinâmico
+// ==========================================
+
+// ================== INPUTS ==================
+Input
+    PeriodoSR(20);
+    ConfirmarFechamento(True);
+    MostrarLinhas(True);
+    StopPts(30);
+    AlvoPts(90);
+    RangeLateralPts(150); // backup fail-safe (não usado diretamente)
+
+    // ---- Controle de lateralidade dinâmica (ATR%) ----
+    ATRPeriodo(14);
+    ATRTipo(2);
+    FatorATR(2.8);           // multiplica o ATR para definir limiar de lateralidade
+    LimiarATRMin(100);       // fail-safe mínimo em pontos
+
+    // ---- Gestão de risco ----
+    StopInicialPts(100);     // Stop fixo inicial
+    AtivarStopRetrair(True);
+    PtsRetrair(80);
+    PtsProtecao(50);
+
+    // ---- Configurações padrão GERANTSL ----
+    ContaPadrao("PRACTICE");
+    DelayExecucao(0.700);
+
+// ================= VARIÁVEIS ================
+Var
+    Suporte, Resistencia : Float;
+    SuporteFix, ResistenciaFix : Float;
+    RompeuRes, RompeuSup : Boolean;
+    SinalCompra, SinalVenda : Boolean;
+    EmLateral : Boolean;
+    LimSupLat, LimInfLat : Float;
+
+    // ATR
+    ATRval, RangeSR : Float;
+    LimiarATR : Float;
+
+    // Execução e gestão
+    RompimentoAtivo : Boolean;
+    ValorEntrada, StopInicialNivel : Float;
+    StopRetrairNivel : Float;
+    StopRetrairAtivo : Boolean;
+    PicoLucro, FundoLucro : Float;
+    Tick : Float;
+
+    // Controle de reentrada
+    BarraEntrada : Integer;
+    BarraBloqueioEntrada : Integer;
+    EstavaComprado, EstavaVendido : Boolean;
+
+    // Visual
+    CorCandle : Integer;
+
+// ================== INÍCIO ==================
+Begin
+    If CurrentBar = 0 Then
+    Begin
+        RompimentoAtivo := False;
+        LimSupLat := 0; LimInfLat := 0;
+        BarraEntrada := -1;
+        BarraBloqueioEntrada := -2;
+        PicoLucro := 0;
+        FundoLucro := 9999999;
+        StopRetrairAtivo := False;
+    End;
+
+    Tick := MinPriceIncrement;
+
+    EstavaComprado := IsBought;
+    EstavaVendido  := IsSold;
+
+    // --- 1️⃣ Suporte e Resistência ---
+    Suporte     := Lowest(Low,  PeriodoSR);
+    Resistencia := Highest(High, PeriodoSR);
+    SuporteFix     := Suporte[1];
+    ResistenciaFix := Resistencia[1];
+
+    // --- 2️⃣ Lateralidade Dinâmica (ATR%) ---
+    ATRval := AvgTrueRange(ATRPeriodo, ATRTipo);
+    RangeSR := ResistenciaFix - SuporteFix;
+    LimiarATR := Max(ATRval * FatorATR, LimiarATRMin);
+
+    EmLateral := RangeSR <= LimiarATR;
+
+    If EmLateral Then
+    Begin
+        LimSupLat := ResistenciaFix;
+        LimInfLat := SuporteFix;
+    End;
+
+    // --- 3️⃣ Rompimentos ---
+    If ConfirmarFechamento Then
+    Begin
+        RompeuRes := Close > ResistenciaFix;
+        RompeuSup := Close < SuporteFix;
+    End
+    Else
+    Begin
+        RompeuRes := High > ResistenciaFix;
+        RompeuSup := Low  < SuporteFix;
+    End;
+
+    SinalCompra := RompeuRes;
+    SinalVenda  := RompeuSup;
+
+    // --- 4️⃣ Bloqueios ---
+    If EmLateral and (Close <= LimSupLat) and (Close >= LimInfLat) Then
+    Begin
+        SinalCompra := False;
+        SinalVenda  := False;
+    End;
+
+    If RompimentoAtivo Then
+    Begin
+        SinalCompra := False;
+        SinalVenda  := False;
+        If (Close <= ResistenciaFix) and (Close >= SuporteFix) Then
+            RompimentoAtivo := False;
+    End;
+
+    // --- 5️⃣ Coloração ---
+    If SinalCompra Then
+        CorCandle := clLime
+    Else If SinalVenda Then
+        CorCandle := clRed
+    Else
+        CorCandle := clSilver;
+    PaintBar(CorCandle);
+
+    // =====================================================
+    // 6️⃣ Stop Dinâmico por Retração (80/80) + Proteção 50
+    // =====================================================
+    If AtivarStopRetrair Then
+    Begin
+        // --- COMPRADO ---
+        If IsBought Then
+        Begin
+            If High > PicoLucro Then PicoLucro := High;
+            If ((PicoLucro - BuyPrice) >= PtsRetrair) and ((PicoLucro - Close) >= PtsRetrair) Then
+            Begin
+                StopRetrairNivel := Close - PtsProtecao;
+                If StopRetrairNivel < (BuyPrice + Tick) Then
+                    StopRetrairNivel := BuyPrice + Tick;
+                StopRetrairNivel := Round(StopRetrairNivel / Tick) * Tick;
+                SellToCoverStop(StopRetrairNivel, StopRetrairNivel + Tick);
+                StopRetrairAtivo := True;
+            End;
+        End;
+
+        // --- VENDIDO ---
+        If IsSold Then
+        Begin
+            If Low < FundoLucro Then FundoLucro := Low;
+            If ((SellPrice - FundoLucro) >= PtsRetrair) and ((Close - FundoLucro) >= PtsRetrair) Then
+            Begin
+                StopRetrairNivel := Close + PtsProtecao;
+                If StopRetrairNivel > (SellPrice - Tick) Then
+                    StopRetrairNivel := SellPrice - Tick;
+                StopRetrairNivel := Round(StopRetrairNivel / Tick) * Tick;
+                BuyToCoverStop(StopRetrairNivel, StopRetrairNivel - Tick);
+                StopRetrairAtivo := True;
+            End;
+        End;
+    End;
+
+    // --- 7️⃣ Fechamento e bloqueio de reentrada ---
+    If (not IsBought) and (not IsSold) and (EstavaComprado or EstavaVendido) Then
+    Begin
+        If StopRetrairAtivo Then
+            BarraBloqueioEntrada := CurrentBar;
+
+        PicoLucro := 0;
+        FundoLucro := 9999999;
+        StopRetrairAtivo := False;
+    End;
+
+    // =====================================================
+    // 8️⃣ Entradas com verificação de bloqueio
+    // =====================================================
+
+    // --- COMPRA ---
+    If SinalCompra and (not IsBought) and (not IsSold) and (CurrentBar > BarraBloqueioEntrada) Then
+    Begin
+        BuyAtMarket;
+        RompimentoAtivo := True;
+        BarraEntrada := CurrentBar;
+
+        ValorEntrada := Close;
+        StopInicialNivel := ValorEntrada - StopInicialPts;
+        If StopInicialNivel > (ValorEntrada - Tick) Then
+            StopInicialNivel := ValorEntrada - (5 * Tick);
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+
+        SellToCoverLimit(ValorEntrada + AlvoPts);
+        SellToCoverStop(StopInicialNivel, StopInicialNivel + Tick);
+
+        PicoLucro := 0;
+        FundoLucro := 9999999;
+        StopRetrairAtivo := False;
+    End;
+
+    If IsBought and (BuyPrice > 0) Then
+    Begin
+        ValorEntrada := BuyPrice;
+        StopInicialNivel := ValorEntrada - StopInicialPts;
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+        SellToCoverStop(StopInicialNivel, StopInicialNivel + Tick);
+    End;
+
+    // --- VENDA ---
+    If SinalVenda and (not IsBought) and (not IsSold) and (CurrentBar > BarraBloqueioEntrada) Then
+    Begin
+        SellShortAtMarket;
+        RompimentoAtivo := True;
+        BarraEntrada := CurrentBar;
+
+        ValorEntrada := Close;
+        StopInicialNivel := ValorEntrada + StopInicialPts;
+        If StopInicialNivel < (ValorEntrada + Tick) Then
+            StopInicialNivel := ValorEntrada + (2 * Tick);
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+
+        BuyToCoverLimit(ValorEntrada - AlvoPts);
+        BuyToCoverStop(StopInicialNivel, StopInicialNivel - Tick);
+
+        PicoLucro := 0;
+        FundoLucro := 9999999;
+        StopRetrairAtivo := False;
+    End;
+
+    If IsSold and (SellPrice > 0) Then
+    Begin
+        ValorEntrada := SellPrice;
+        StopInicialNivel := ValorEntrada + StopInicialPts;
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+        BuyToCoverStop(StopInicialNivel, StopInicialNivel - Tick);
+    End;
+
+    // --- 9️⃣ Linhas SR e Indicador Visual ---
+    If MostrarLinhas Then
+    Begin
+        Plot(ResistenciaFix);
+        Plot2(SuporteFix);
+        SetPlotColor(1, clFuchsia);
+        SetPlotColor(2, clAqua);
+        SetPlotWidth(1, 1);
+        SetPlotWidth(2, 1);
+    End;
+
+    // --- 🔟 Indicador visual de lateralidade ---
+    If LastBarOnChart and EmLateral Then
+        PlotText("⚠ LATERAL ATR", clYellow, 1, 9, Close + (Range * 0.2));
+End;
