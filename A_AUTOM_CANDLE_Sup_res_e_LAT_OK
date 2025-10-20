@@ -1,0 +1,345 @@
+// ==========================================
+// GERANTSL_RompimentoDinamico v3.5.3 SafeMode++++ (Candle Edition)
+// - NÃO OPERA dentro do espaço entre Suporte e Resistência
+// - Entrada SOMENTE após confirmação por N candles
+// - SR de referência CONGELADO no momento do rompimento até a confirmação
+// - Stop inicial fixo; Stop dinâmico por retração (80/80) + proteção (50)
+// - Bloqueio de reentrada após stop dinâmico
+// - PLOTS: Suporte/Resistência sempre visíveis e destacados
+// ==========================================
+
+// ================== INPUTS ==================
+Input
+    PeriodoSR(20);
+    ConfirmarFechamento(True);     // True: usa Close; False: usa High/Low
+
+    // --- Visual SR ---
+    MostrarLinhasSR(True);
+    EspessuraSR(2);                // 1..4
+
+    // --- Alvo/Stops (compatibilidade) ---
+    StopPts(30);
+    AlvoPts(90);
+    RangeLateralPts(150);          // legado (não usado, mantido p/ compatibilidade)
+
+    // --- Confirmação de rompimento ---
+    ConfirmacaoBarras(1);          // nº de candles após o rompimento para confirmar
+
+    // --- Gestão de risco ---
+    StopInicialPts(100);
+    AtivarStopRetrair(True);
+    PtsRetrair(80);
+    PtsProtecao(50);
+
+    // --- Padrões GERANTSL ---
+    ContaPadrao("PRACTICE");
+    DelayExecucao(0.700);
+
+// ================= VARIÁVEIS ================
+Var
+    // SR e sinais base
+    Suporte, Resistencia : Float;
+    SuporteFix, ResistenciaFix : Float;
+    RompeuResNow, RompeuSupNow : Boolean;
+    SinalCompra, SinalVenda : Boolean;
+
+    // Caixa SR atual
+    RangeSR : Float;
+    DentroDaCaixaAtual : Boolean;
+
+    // ===== CONFIRMAÇÃO COM SR CONGELADO =====
+    EmConfirmacao : Boolean;       // existe pendência aguardando confirmação?
+    TipoPendencia : Integer;       // +1 compra, -1 venda
+    BarraSinal    : Integer;       // barra do rompimento bruto
+    SupSinal, ResSinal : Float;    // SR CONGELADOS na barra do rompimento
+
+    // Execução / gestão
+    RompimentoAtivo : Boolean;
+    ValorEntrada, StopInicialNivel : Float;
+    StopRetrairNivel : Float;
+    StopRetrairAtivo : Boolean;
+    PicoLucro, FundoLucro : Float;
+    Tick : Float;
+
+    // Controle de reentrada
+    BarraEntrada : Integer;
+    BarraBloqueioEntrada : Integer;
+    EstavaComprado, EstavaVendido : Boolean;
+    StopInicialArmado : Boolean;
+    DirecaoPos : Integer;          // 1 = comprado, -1 = vendido, 0 = flat
+
+    // Visual
+    CorCandle : Integer;
+
+    // Para linhas horizontais estendidas
+    JanelaCandles : Integer;
+    InicioLinha, FimLinha : Integer;
+
+// ================== INÍCIO ==================
+Begin
+    If CurrentBar = 0 Then
+    Begin
+        RompimentoAtivo := False;
+        BarraEntrada := -1;
+        BarraBloqueioEntrada := -2;
+        PicoLucro := 0; FundoLucro := 9999999;
+        StopRetrairAtivo := False; StopInicialArmado := False; DirecaoPos := 0;
+
+        EmConfirmacao := False; TipoPendencia := 0; BarraSinal := -9999;
+        SupSinal := 0; ResSinal := 0;
+    End;
+
+    Tick := MinPriceIncrement;
+    EstavaComprado := IsBought;  EstavaVendido := IsSold;
+
+    // Janela para desenho das linhas estendidas
+    JanelaCandles := PeriodoSR;
+    InicioLinha := CurrentBar - JanelaCandles;
+    If InicioLinha < 0 Then InicioLinha := 0;
+    FimLinha := CurrentBar;
+
+    // -------- 1) Suporte e Resistência (congelados na barra anterior) --------
+    Suporte     := Lowest(Low,  PeriodoSR);
+    Resistencia := Highest(High, PeriodoSR);
+    SuporteFix     := Suporte[1];
+    ResistenciaFix := Resistencia[1];
+
+    // -------- 2) Caixa SR ATUAL --------
+    RangeSR := ResistenciaFix - SuporteFix;
+
+    // Se houver pendência, a caixa para bloqueio usa os SR CONGELADOS;
+    // caso contrário usa os SR atuais.
+    If EmConfirmacao Then
+        DentroDaCaixaAtual := (Close <= ResSinal) and (Close >= SupSinal)
+    Else
+        DentroDaCaixaAtual := (Close <= ResistenciaFix) and (Close >= SuporteFix);
+
+    // -------- 3) Rompimento bruto desta barra --------
+    If ConfirmarFechamento Then
+    Begin
+        RompeuResNow := Close > ResistenciaFix;
+        RompeuSupNow := Close < SuporteFix;
+    End
+    Else
+    Begin
+        RompeuResNow := High > ResistenciaFix;
+        RompeuSupNow := Low  < SuporteFix;
+    End;
+
+    // -------- 4) Cria pendência e CONGELA SR no momento do rompimento --------
+    If (not EmConfirmacao) Then
+    Begin
+        If RompeuResNow Then
+        Begin
+            EmConfirmacao := True; TipoPendencia := +1; BarraSinal := CurrentBar;
+            SupSinal := SuporteFix; ResSinal := ResistenciaFix;   // congela SR
+        End
+        Else If RompeuSupNow Then
+        Begin
+            EmConfirmacao := True; TipoPendencia := -1; BarraSinal := CurrentBar;
+            SupSinal := SuporteFix; ResSinal := ResistenciaFix;   // congela SR
+        End;
+    End;
+
+    // -------- 5) Cancelamento se voltar para dentro da CAIXA CONGELADA --------
+    If EmConfirmacao Then
+    Begin
+        If (Close <= ResSinal) and (Close >= SupSinal) Then
+        Begin
+            EmConfirmacao := False; TipoPendencia := 0; BarraSinal := -9999;
+        End;
+    End;
+
+    // -------- 6) Confirmação após N candles usando SR CONGELADOS --------
+    SinalCompra := False;  SinalVenda := False;
+
+    If EmConfirmacao Then
+    Begin
+        // Permite execução imediata se ConfirmacaoBarras = 0 (modo agressivo)
+        If (ConfirmacaoBarras = 0) or ((CurrentBar - BarraSinal) >= ConfirmacaoBarras) Then
+        Begin
+            If TipoPendencia = +1 Then
+            Begin
+                // Confirmação por fechamento OU, no modo imediato, por máxima
+                If Close > ResSinal Then
+                Begin
+                    SinalCompra := True;
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End
+                Else If (ConfirmacaoBarras = 0) and (High > ResSinal) Then
+                Begin
+                    SinalCompra := True;
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End
+                Else
+                Begin
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End;
+            End
+            Else If TipoPendencia = -1 Then
+            Begin
+                If Close < SupSinal Then
+                Begin
+                    SinalVenda := True;
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End
+                Else If (ConfirmacaoBarras = 0) and (Low < SupSinal) Then
+                Begin
+                    SinalVenda := True;
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End
+                Else
+                Begin
+                    EmConfirmacao := False; TipoPendencia := 0;
+                End;
+            End;
+        End;
+    End;
+
+    // -------- 7) Bloqueios gerais --------
+    If DentroDaCaixaAtual Then
+    Begin
+        SinalCompra := False; SinalVenda := False;
+    End;
+
+    If RompimentoAtivo Then
+    Begin
+        SinalCompra := False; SinalVenda := False;
+        If DentroDaCaixaAtual Then RompimentoAtivo := False;
+    End;
+
+    // -------- 8) Coloração --------
+    If SinalCompra Then
+        CorCandle := clLime
+    Else If SinalVenda Then
+        CorCandle := clRed
+    Else If EmConfirmacao Then
+    Begin
+        If ConfirmacaoBarras >= 1 Then
+            CorCandle := RGB(230, 200, 50) // amarelo enquanto espera
+        Else
+            CorCandle := clWhite;          // sem amarelo no modo imediato
+    End
+    Else If DentroDaCaixaAtual Then
+        CorCandle := clSilver
+    Else
+        CorCandle := clWhite;
+    PaintBar(CorCandle);
+
+    // =====================================================
+    // 9) ENTRADAS
+    // =====================================================
+    If SinalCompra and (not IsBought) and (not IsSold) and (CurrentBar > BarraBloqueioEntrada) Then
+    Begin
+        BuyAtMarket;
+        RompimentoAtivo := True; BarraEntrada := CurrentBar;
+        StopInicialArmado := False; DirecaoPos := 1;
+        PicoLucro := 0; FundoLucro := 9999999; StopRetrairAtivo := False;
+    End;
+
+    If SinalVenda and (not IsBought) and (not IsSold) and (CurrentBar > BarraBloqueioEntrada) Then
+    Begin
+        SellShortAtMarket;
+        RompimentoAtivo := True; BarraEntrada := CurrentBar;
+        StopInicialArmado := False; DirecaoPos := -1;
+        PicoLucro := 0; FundoLucro := 9999999; StopRetrairAtivo := False;
+    End;
+
+    // -------- 10) Armar STOP/ALVO quando houver preço real de execução --------
+    If (IsBought) and (BuyPrice > 0) and (DirecaoPos = 1) and (not StopInicialArmado) Then
+    Begin
+        ValorEntrada := BuyPrice;
+        SellToCoverLimit(ValorEntrada + AlvoPts);
+        StopInicialNivel := ValorEntrada - StopInicialPts;
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+        SellToCoverStop(StopInicialNivel, StopInicialNivel + Tick);
+        StopInicialArmado := True;
+    End;
+
+    If (IsSold) and (SellPrice > 0) and (DirecaoPos = -1) and (not StopInicialArmado) Then
+    Begin
+        ValorEntrada := SellPrice;
+        BuyToCoverLimit(ValorEntrada - AlvoPts);
+        StopInicialNivel := ValorEntrada + StopInicialPts;
+        StopInicialNivel := Round(StopInicialNivel / Tick) * Tick;
+        BuyToCoverStop(StopInicialNivel, StopInicialNivel - Tick);
+        StopInicialArmado := True;
+    End;
+
+    // -------- 11) Stop Dinâmico por retração (80/80) + Proteção 50 --------
+    If AtivarStopRetrair and StopInicialArmado Then
+    Begin
+        // Long
+        If IsBought Then
+        Begin
+            If High > PicoLucro Then PicoLucro := High;
+            If ((PicoLucro - BuyPrice) >= PtsRetrair) and ((PicoLucro - Close) >= PtsRetrair) Then
+            Begin
+                StopRetrairNivel := Close - PtsProtecao;
+                If StopRetrairNivel < (BuyPrice + Tick) Then StopRetrairNivel := BuyPrice + Tick;
+                StopRetrairNivel := Round(StopRetrairNivel / Tick) * Tick;
+                SellToCoverStop(StopRetrairNivel, StopRetrairNivel + Tick);
+                StopRetrairAtivo := True;
+            End;
+        End;
+
+        // Short
+        If IsSold Then
+        Begin
+            If Low < FundoLucro Then FundoLucro := Low;
+            If ((SellPrice - FundoLucro) >= PtsRetrair) and ((Close - FundoLucro) >= PtsRetrair) Then
+            Begin
+                StopRetrairNivel := Close + PtsProtecao;
+                If StopRetrairNivel > (SellPrice - Tick) Then StopRetrairNivel := SellPrice - Tick;
+                StopRetrairNivel := Round(StopRetrairNivel / Tick) * Tick;
+                BuyToCoverStop(StopRetrairNivel, StopRetrairNivel - Tick);
+                StopRetrairAtivo := True;
+            End;
+        End;
+    End;
+
+    // -------- 12) Fechamento e bloqueio de reentrada --------
+    If (not IsBought) and (not IsSold) and (EstavaComprado or EstavaVendido) Then
+    Begin
+        If StopRetrairAtivo Then BarraBloqueioEntrada := CurrentBar;
+        PicoLucro := 0; FundoLucro := 9999999;
+        StopRetrairAtivo := False; StopInicialArmado := False; DirecaoPos := 0;
+    End;
+
+    //========
+  // -------- 13) PLOTS: SR atual e SR congelado --------
+If MostrarLinhasSR Then
+Begin
+    // Sanidade da janela (evita índices negativos)
+    If InicioLinha < 0 Then InicioLinha := 0;
+    If FimLinha    < 0 Then FimLinha    := 0;
+    If FimLinha < InicioLinha Then FimLinha := InicioLinha;
+
+    // ===== SR base do sistema (fixos da barra anterior) =====
+    HorizontalLineCustom(ResistenciaFix, clFuchsia, EspessuraSR, psDash,
+                         "Resistência", 8, tpTopRight,
+                         InicioLinha, FimLinha, 1);
+
+    HorizontalLineCustom(SuporteFix, clAqua, EspessuraSR, psDash,
+                         "Suporte", 8, tpBottomRight,
+                         InicioLinha, FimLinha, 1);
+
+    // ===== SR CONGELADOS (quando há confirmação em andamento) =====
+    If EmConfirmacao Then
+    Begin
+        HorizontalLineCustom(ResSinal, RGB(200,120,255), EspessuraSR + 1, psSolid,
+                             "Resistência (conf.)", 8, tpTopRight,
+                             InicioLinha, FimLinha, 0);
+
+        HorizontalLineCustom(SupSinal, RGB(120,220,220), EspessuraSR + 1, psSolid,
+                             "Suporte (conf.)", 8, tpBottomRight,
+                             InicioLinha, FimLinha, 0);
+    End;
+End
+Else
+Begin
+    // Se desejar ocultar tudo quando desligar
+    // (mantido vazio para não interferir nos seus plots/cores de candle)
+End;
+
+End;
